@@ -10,6 +10,8 @@
  */
 package com.mulesoft.mule.devkit.circuitbreaker;
 
+import static org.mule.api.config.MuleProperties.OBJECT_STORE_DEFAULT_PERSISTENT_NAME;
+
 import java.util.Date;
 import java.util.concurrent.Semaphore;
 
@@ -17,12 +19,11 @@ import javax.inject.Inject;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.mule.api.annotations.Module;
 import org.mule.api.MuleContext;
 import org.mule.api.annotations.Configurable;
+import org.mule.api.annotations.Module;
 import org.mule.api.annotations.Processor;
 import org.mule.api.annotations.param.Payload;
-import org.mule.api.config.MuleProperties;
 import org.mule.api.context.MuleContextAware;
 import org.mule.api.store.ObjectStore;
 import org.mule.api.store.ObjectStoreManager;
@@ -31,6 +32,7 @@ import org.mule.message.ExceptionMessage;
 /**
  * A module that implements the circuit breaker pattern
  *
+ * @author Gerald Loeffler
  * @author Adam Davis
  * @author John D'Emic
  * 
@@ -38,24 +40,16 @@ import org.mule.message.ExceptionMessage;
 @Module(name = "circuitbreaker", schemaVersion = "0.0.1-SNAPSHOT")
 public class CircuitBreakerModule implements MuleContextAware {
 
-	protected transient Log logger = LogFactory.getLog(getClass());
+	private static final Log LOG = LogFactory.getLog(CircuitBreakerModule.class);
 
 	/**
-	 * The amount of failures until the circuit breaker is tripped.
+	 * The amount of failures (exceptions) until the circuit breaker is tripped.
 	 */
 	@Configurable
 	private int tripThreshold;
 
-	public int getTripThreshold() {
-		return tripThreshold;
-	}
-
-	public long getTripTimeout() {
-		return tripTimeout;
-	}
-
 	/**
-	 * How long to wait until the breaker is automatically reset.
+	 * How long to wait (in milliseconds) until the breaker is automatically reset.
 	 */
 	@Configurable
 	private long tripTimeout;
@@ -70,7 +64,7 @@ public class CircuitBreakerModule implements MuleContextAware {
 
 	private Semaphore objectStoreMutex = new Semaphore(1);
 
-	MuleContext muleContext;
+	private MuleContext muleContext;
 
 	@Inject
 	private ObjectStoreManager objectStoreManager;
@@ -79,8 +73,16 @@ public class CircuitBreakerModule implements MuleContextAware {
 		this.tripThreshold = tripThreshold;
 	}
 
+	public int getTripThreshold() {
+		return tripThreshold;
+	}
+
 	public void setTripTimeout(long tripTimeout) {
 		this.tripTimeout = tripTimeout;
+	}
+
+	public long getTripTimeout() {
+		return tripTimeout;
 	}
 
 	public void setBreakerName(String breakerName) {
@@ -93,6 +95,18 @@ public class CircuitBreakerModule implements MuleContextAware {
 
 	public void setMuleContext(MuleContext muleContext) {
 		this.muleContext = muleContext;
+	}
+
+	public MuleContext getMuleContext() {
+		return muleContext;
+	}
+
+	public void setObjectStoreManager(ObjectStoreManager objectStoreManager) {
+		this.objectStoreManager = objectStoreManager;
+	}
+
+	public ObjectStoreManager getObjectStoreManager() {
+		return objectStoreManager;
 	}
 
 	/**
@@ -108,19 +122,34 @@ public class CircuitBreakerModule implements MuleContextAware {
 	 */
 	@Processor
 	public Object filter(@Payload Object payload) throws CircuitOpenException {
-		logger.debug("circuitbeaker:filter applied");
-		if (getFailureCount() < tripThreshold) {
-			logger.debug("circuitbeaker:filter - failure count too low");
+		LOG.debug("circuitbeaker:filter applied");
+
+		if (tooFewFailuresToTrip()) {
+			LOG.debug("circuitbeaker:filter - failure count too low");
 			return payload;
-		} else if (breakerTrippedOn != null && System.currentTimeMillis() - breakerTrippedOn.getTime() > tripTimeout) {
-			logger.debug("circuitbeaker:filter - failure count exceeds threashold but timeout exceeded, count reset");
+		}
+
+		if (isOpenButTimeoutExceeded()) {
+			LOG.debug("circuitbeaker:filter - failure count exceeds threashold but timeout exceeded, count reset");
 			breakerTrippedOn = null;
 			resetFailureCount();
 			return payload;
-		} else {
-			logger.debug("circuitbreaker:filter ACTIVATED");
-			throw new CircuitOpenException();
 		}
+
+		LOG.debug("circuitbreaker:filter ACTIVATED");
+		throw new CircuitOpenException();
+	}
+
+	private boolean tooFewFailuresToTrip() {
+		return getFailureCount() < tripThreshold;
+	}
+
+	private boolean isOpenButTimeoutExceeded() {
+		return breakerTrippedOn != null && timeoutExceeded();
+	}
+
+	private boolean timeoutExceeded() {
+		return System.currentTimeMillis() - breakerTrippedOn.getTime() > tripTimeout;
 	}
 
 	/**
@@ -136,125 +165,120 @@ public class CircuitBreakerModule implements MuleContextAware {
 	 */
 	@Processor
 	public Object trip(String tripOnException, @Payload ExceptionMessage exceptionMessage) {
-		logger.debug("trip triggered [" + exceptionMessage.getException().getCause().getClass().getCanonicalName() + "] ["
-		        + exceptionMessage.getException() + "] comparing to [" + tripOnException + "]");
+		LOG.debug("trip triggered [" + exceptionMessage.getException().getCause().getClass().getCanonicalName() + "] ["
+				+ exceptionMessage.getException() + "] comparing to [" + tripOnException + "]");
 		if (exceptionMatches(exceptionMessage, tripOnException)) {
-			logger.debug("trip matched to: " + tripOnException);
+			LOG.debug("trip matched to: " + tripOnException);
 			incrementFailureCount();
-			if (getFailureCount() == tripThreshold) {
-				logger.debug("failure count matches trip threshold [" + tripThreshold + "]");
+			if (tipThresholdReached()) {
+				LOG.debug("failure count matches trip threshold [" + tripThreshold + "]");
 				breakerTrippedOn = new Date();
 			}
 		}
 		return exceptionMessage;
 	}
 
+	private boolean tipThresholdReached() {
+		return getFailureCount() >= tripThreshold;
+	}
+
 	/**
-	 * Validate that the exception message configured is 
-	 * a super class of the exception that has been thrown
+	 * Validate that the exception message configured is a super class of the exception that has been thrown
 	 */
 	private boolean exceptionMatches(ExceptionMessage exceptionMessage, String tripOnException) {
 		try {
 			final Class<?> tripOn = Class.forName(tripOnException);
-			logger.debug("trip class to match: " + tripOn);
+			LOG.debug("trip class to match: " + tripOn);
 			final Class<? extends Throwable> cause = exceptionMessage.getException().getCause().getClass();
-			logger.debug("trip cause: " + cause);
+			LOG.debug("trip cause: " + cause);
 			return tripOn.isAssignableFrom(cause); // was: cause.getCanonicalName().equals(tripOnException);
 		} catch (ClassNotFoundException e) {
 			throw new IllegalArgumentException(tripOnException + " is not a valid class", e);
 		}
 	}
-	
+
 	/**
-	 * Return the number of exception of the configured type that have been thrown. 
+	 * Return the number of exception of the configured type that have been thrown.
 	 */
-	Integer getFailureCount() {
+	private Integer getFailureCount() {
+		final String key = failureCountKey();
+
+		final ObjectStore<Integer> store = getAndLockObjectStore();
 		try {
-			objectStoreMutex.acquire();
-		} catch (InterruptedException e) {
-			logger.error("Could not acquire mutex", e);
-		}
-
-		ObjectStore<Integer> objectStore = objectStoreManager.getObjectStore(MuleProperties.OBJECT_STORE_DEFAULT_PERSISTENT_NAME);
-
-		String key = String.format("%s.failureCount", breakerName);
-
-		Integer failureCount = 0;
-		try {
-			if (objectStore.contains(key)) {
-				failureCount = objectStore.retrieve(key);
+			Integer failureCount = 0;
+			try {
+				if (store.contains(key)) {
+					failureCount = store.retrieve(key);
+				}
+			} catch (Exception e) {
+				LOG.error("Could not retrieve key from object-store: " + key, e);
 			}
-		} catch (Exception e) {
-			logger.error("Could not retrieve key from object-store: " + key, e);
+			return failureCount;
+		} finally {
+			releaseObjectStore();
 		}
-
-		objectStoreMutex.release();
-
-		return failureCount;
-
 	}
-	
+
 	/**
 	 * Increment the number of failures count when the configured exception is hit.
 	 */
-	void incrementFailureCount() {
+	private void incrementFailureCount() {
+		final String key = failureCountKey();
+
+		final ObjectStore<Integer> store = getAndLockObjectStore();
 		try {
-			objectStoreMutex.acquire();
-		} catch (InterruptedException e) {
-			logger.error("Could not acquire mutex", e);
-		}
-
-		ObjectStore<Integer> objectStore = objectStoreManager.getObjectStore(MuleProperties.OBJECT_STORE_DEFAULT_PERSISTENT_NAME);
-
-		String key = String.format("%s.failureCount", breakerName);
-
-		Integer failureCount = 0;
-		try {
-			if (objectStore.contains(key)) {
-				failureCount = objectStore.retrieve(key);
-				objectStore.remove(key);
+			Integer failureCount = 0;
+			if (store.contains(key)) {
+				failureCount = store.retrieve(key);
+				store.remove(key);
 			}
-			objectStore.store(key, failureCount + 1);
+			store.store(key, failureCount + 1);
 		} catch (Exception e) {
-			logger.error("Could not retrieve key from object-store: " + key, e);
+			LOG.error("Could not manipulate key in object-store: " + key, e);
+		} finally {
+			releaseObjectStore();
 		}
-
-		objectStoreMutex.release();
 	}
 
-	
 	/**
-	 * Reset the exception count after the circuitbreaker is reset 
+	 * Reset the exception count after the circuitbreaker is reset
 	 */
 	void resetFailureCount() {
-		try {
-			objectStoreMutex.acquire();
-		} catch (InterruptedException e) {
-			logger.error("Could not acquire mutex", e);
-		}
+		final String key = failureCountKey();
 
-		ObjectStore<Integer> objectStore = objectStoreManager.getObjectStore(MuleProperties.OBJECT_STORE_DEFAULT_PERSISTENT_NAME);
-
-		String key = String.format("%s.failureCount", breakerName);
-
+		final ObjectStore<Integer> objectStore = getAndLockObjectStore();
 		try {
 			if (objectStore.contains(key)) {
 				objectStore.remove(key);
 			}
 			objectStore.store(key, 0);
 		} catch (Exception e) {
-			logger.error("Could not retrieve key from object-store: " + key, e);
+			LOG.error("Could not remove/store key in object-store: " + key, e);
+		} finally {
+			releaseObjectStore();
 		}
+	}
 
+	private ObjectStore<Integer> getAndLockObjectStore() {
+		acquireObjectStoreMutex();
+
+		return objectStoreManager.<ObjectStore<Integer>> getObjectStore(OBJECT_STORE_DEFAULT_PERSISTENT_NAME);
+	}
+
+	private void acquireObjectStoreMutex() {
+		try {
+			objectStoreMutex.acquire();
+		} catch (InterruptedException e) {
+			LOG.error("Could not acquire mutex", e);
+			throw new RuntimeException("Could not acquire mutex", e);
+		}
+	}
+
+	private void releaseObjectStore() {
 		objectStoreMutex.release();
 	}
 
-	public ObjectStoreManager getObjectStoreManager() {
-		return objectStoreManager;
+	private String failureCountKey() {
+		return String.format("%s.failureCount", breakerName);
 	}
-
-	public void setObjectStoreManager(ObjectStoreManager objectStoreManager) {
-		this.objectStoreManager = objectStoreManager;
-	}
-
 }
