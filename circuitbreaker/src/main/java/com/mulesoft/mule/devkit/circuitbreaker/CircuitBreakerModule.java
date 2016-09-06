@@ -17,17 +17,19 @@ import java.util.concurrent.Semaphore;
 
 import javax.inject.Inject;
 
+import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.mule.api.ExceptionPayload;
 import org.mule.api.MuleContext;
+import org.mule.api.MuleEvent;
+import org.mule.api.MuleMessage;
 import org.mule.api.annotations.Config;
 import org.mule.api.annotations.Connector;
 import org.mule.api.annotations.Processor;
 import org.mule.api.annotations.param.Payload;
 import org.mule.api.store.ObjectStore;
 import org.mule.api.store.ObjectStoreManager;
-import org.mule.extension.annotations.Configuration;
-import org.mule.extension.annotations.Configurations;
 import org.mule.message.ExceptionMessage;
 
 /**
@@ -136,10 +138,12 @@ public class CircuitBreakerModule {
 	 * @return Some string
 	 */
 	@Processor
-	public Object trip(String tripOnException, @Payload ExceptionMessage exceptionMessage) {
-		LOG.debug("trip triggered [" + exceptionMessage.getException().getCause().getClass().getCanonicalName() + "] ["
-				+ exceptionMessage.getException() + "] comparing to [" + tripOnException + "]");
-		if (exceptionMatches(exceptionMessage, tripOnException)) {
+	public Object trip(String tripOnException, MuleEvent exceptionEvent) {
+		MuleMessage exceptionMessage = exceptionEvent.getMessage();
+		ExceptionPayload exceptionPayload = exceptionMessage.getExceptionPayload();
+		LOG.debug("trip triggered [" + exceptionPayload.getException().getCause().getClass().getCanonicalName() + "] ["
+				+ exceptionPayload.getException() + "] comparing to [" + tripOnException + "]");
+		if (exceptionMatches(exceptionPayload, tripOnException)) {
 			LOG.debug("trip matched to: " + tripOnException);
 			incrementFailureCount();
 			if (tipThresholdReached()) {
@@ -147,21 +151,23 @@ public class CircuitBreakerModule {
 				breakerTrippedOn = new Date();
 			}
 		}
+		
 		return exceptionMessage;
 	}
 
 	private boolean tipThresholdReached() {
-		return getFailureCount() >= config.getTripThreshold();
+		Integer failures = getFailureCount();
+		return failures >= config.getTripThreshold();
 	}
 
 	/**
 	 * Validate that the exception message configured is a super class of the exception that has been thrown
 	 */
-	private boolean exceptionMatches(ExceptionMessage exceptionMessage, String tripOnException) {
+	private boolean exceptionMatches(ExceptionPayload exceptionMessage, String tripOnException) {
 		try {
 			final Class<?> tripOn = Class.forName(tripOnException);
 			LOG.debug("trip class to match: " + tripOn);
-			final Class<? extends Throwable> cause = exceptionMessage.getException().getCause().getClass();
+			final Class<? extends Throwable> cause = ExceptionUtils.getRootCause(exceptionMessage.	getException()).getClass();
 			LOG.debug("trip cause: " + cause);
 			return tripOn.isAssignableFrom(cause); // was: cause.getCanonicalName().equals(tripOnException);
 		} catch (ClassNotFoundException e) {
