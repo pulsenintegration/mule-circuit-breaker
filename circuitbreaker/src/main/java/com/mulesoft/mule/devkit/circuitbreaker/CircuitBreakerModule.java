@@ -20,13 +20,14 @@ import javax.inject.Inject;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.mule.api.MuleContext;
-import org.mule.api.annotations.Configurable;
-import org.mule.api.annotations.Module;
+import org.mule.api.annotations.Config;
+import org.mule.api.annotations.Connector;
 import org.mule.api.annotations.Processor;
 import org.mule.api.annotations.param.Payload;
-import org.mule.api.context.MuleContextAware;
 import org.mule.api.store.ObjectStore;
 import org.mule.api.store.ObjectStoreManager;
+import org.mule.extension.annotations.Configuration;
+import org.mule.extension.annotations.Configurations;
 import org.mule.message.ExceptionMessage;
 
 /**
@@ -35,64 +36,27 @@ import org.mule.message.ExceptionMessage;
  * @author Gerald Loeffler
  * @author Adam Davis
  * @author John D'Emic
+ * @author Nahuel Lofeudo
  * 
  */
-@Module(name = "circuitbreaker", schemaVersion = "0.0.1-SNAPSHOT")
-public class CircuitBreakerModule implements MuleContextAware {
+@Connector(name = "circuitbreaker", schemaVersion = "0.0.2-SNAPSHOT", friendlyName="Circuit Breaker")
+public class CircuitBreakerModule {
 
 	private static final Log LOG = LogFactory.getLog(CircuitBreakerModule.class);
 
-	/**
-	 * The amount of failures (exceptions) until the circuit breaker is tripped.
-	 */
-	@Configurable
-	private int tripThreshold;
-
-	/**
-	 * How long to wait (in milliseconds) until the breaker is automatically reset.
-	 */
-	@Configurable
-	private long tripTimeout;
-
-	/**
-	 * The name of this breaker.
-	 */
-	@Configurable
-	private String breakerName;
+	@Config
+	CircuitBreakerConfig config;
 
 	private Date breakerTrippedOn;
 
 	private Semaphore objectStoreMutex = new Semaphore(1);
 
+	@Inject
 	private MuleContext muleContext;
 
 	@Inject
 	private ObjectStoreManager objectStoreManager;
-
-	public void setTripThreshold(int tripThreshold) {
-		this.tripThreshold = tripThreshold;
-	}
-
-	public int getTripThreshold() {
-		return tripThreshold;
-	}
-
-	public void setTripTimeout(long tripTimeout) {
-		this.tripTimeout = tripTimeout;
-	}
-
-	public long getTripTimeout() {
-		return tripTimeout;
-	}
-
-	public void setBreakerName(String breakerName) {
-		this.breakerName = breakerName;
-	}
-
-	public String getBreakerName() {
-		return breakerName;
-	}
-
+	
 	public void setMuleContext(MuleContext muleContext) {
 		this.muleContext = muleContext;
 	}
@@ -107,6 +71,14 @@ public class CircuitBreakerModule implements MuleContextAware {
 
 	public ObjectStoreManager getObjectStoreManager() {
 		return objectStoreManager;
+	}
+	
+	public CircuitBreakerConfig getConfig() {
+		return config;
+	}
+
+	public void setConfig(CircuitBreakerConfig config) {
+		this.config = config;
 	}
 
 	/**
@@ -141,7 +113,7 @@ public class CircuitBreakerModule implements MuleContextAware {
 	}
 
 	private boolean tooFewFailuresToTrip() {
-		return getFailureCount() < tripThreshold;
+		return getFailureCount() < config.getTripThreshold();
 	}
 
 	private boolean isOpenButTimeoutExceeded() {
@@ -149,7 +121,7 @@ public class CircuitBreakerModule implements MuleContextAware {
 	}
 
 	private boolean timeoutExceeded() {
-		return System.currentTimeMillis() - breakerTrippedOn.getTime() > tripTimeout;
+		return System.currentTimeMillis() - breakerTrippedOn.getTime() > config.getTripTimeout();
 	}
 
 	/**
@@ -171,7 +143,7 @@ public class CircuitBreakerModule implements MuleContextAware {
 			LOG.debug("trip matched to: " + tripOnException);
 			incrementFailureCount();
 			if (tipThresholdReached()) {
-				LOG.debug("failure count matches trip threshold [" + tripThreshold + "]");
+				LOG.debug("failure count matches trip threshold [" + config.getTripThreshold() + "]");
 				breakerTrippedOn = new Date();
 			}
 		}
@@ -179,7 +151,7 @@ public class CircuitBreakerModule implements MuleContextAware {
 	}
 
 	private boolean tipThresholdReached() {
-		return getFailureCount() >= tripThreshold;
+		return getFailureCount() >= config.getTripThreshold();
 	}
 
 	/**
@@ -279,6 +251,6 @@ public class CircuitBreakerModule implements MuleContextAware {
 	}
 
 	private String failureCountKey() {
-		return String.format("%s.failureCount", breakerName);
+		return String.format("%s.failureCount", config.getBreakerName());
 	}
 }
