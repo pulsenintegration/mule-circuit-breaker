@@ -41,7 +41,7 @@ import org.mule.message.ExceptionMessage;
  * @author Nahuel Lofeudo
  * 
  */
-@Connector(name = "circuitbreaker", schemaVersion = "0.0.2-SNAPSHOT", friendlyName="Circuit Breaker")
+@Connector(name = "circuitbreaker", schemaVersion = "1.0.0", friendlyName="Circuit Breaker")
 public class CircuitBreakerModule {
 
 	private static final Log LOG = LogFactory.getLog(CircuitBreakerModule.class);
